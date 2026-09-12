@@ -1,23 +1,41 @@
 name: Publish crates
 
 on:
-  release:
-    types: [published]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+  workflow_dispatch:
 
 permissions:
   contents: read
-  id-token: write
+
+concurrency:
+  group: publish-crates
+  cancel-in-progress: false
 
 jobs:
-  publish:
+  detect:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
-    environment: release
+    outputs:
+      axtra_published: ${{ steps.version.outputs.axtra_published }}
+      macro_published: ${{ steps.version.outputs.macro_published }}
+      needs_publish: ${{ steps.version.outputs.needs_publish }}
+      release_sha: ${{ steps.version.outputs.release_sha }}
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
-      - name: Verify release version
+      - name: Detect unpublished version
         id: version
         shell: bash
+        env:
+          RELEASE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
         run: |
           macro_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "axtra_macros") | .version')
           axtra_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "axtra") | .version')
@@ -25,13 +43,38 @@ jobs:
             echo "axtra and axtra_macros versions differ" >&2
             exit 1
           fi
-          if [[ "${GITHUB_REF_NAME}" != "axtra-v${axtra_version}" ]]; then
-            echo "release tag must be axtra-v${axtra_version}" >&2
-            exit 1
-          fi
-          echo "version=${axtra_version}" >> "$GITHUB_OUTPUT"
 
-      - run: cargo test --workspace --all-features --locked
+          crate_exists() {
+            cargo info --registry crates-io "$1@$axtra_version" > /dev/null 2>&1
+          }
+
+          macro_published=false
+          axtra_published=false
+          crate_exists axtra_macros && macro_published=true
+          crate_exists axtra && axtra_published=true
+
+          echo "version=$axtra_version" >> "$GITHUB_OUTPUT"
+          echo "release_sha=$RELEASE_SHA" >> "$GITHUB_OUTPUT"
+          echo "macro_published=$macro_published" >> "$GITHUB_OUTPUT"
+          echo "axtra_published=$axtra_published" >> "$GITHUB_OUTPUT"
+          if [[ "$macro_published" == true && "$axtra_published" == true ]]; then
+            echo "needs_publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "needs_publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  publish:
+    needs: detect
+    if: needs.detect.outputs.needs_publish == 'true'
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.detect.outputs.release_sha }}
 
       - name: Authenticate with crates.io
         id: auth
@@ -40,28 +83,25 @@ jobs:
       - name: Publish workspace crates
         shell: bash
         env:
+          AXTRA_PUBLISHED: ${{ needs.detect.outputs.axtra_published }}
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          MACRO_PUBLISHED: ${{ needs.detect.outputs.macro_published }}
         run: |
-          crate_exists() {
-            curl --fail --silent --show-error "https://crates.io/api/v1/crates/$1/$RELEASE_VERSION" > /dev/null
-          }
-
-          if ! crate_exists axtra_macros; then
+          if [[ "$MACRO_PUBLISHED" != true ]]; then
             cargo publish --locked -p axtra_macros
           fi
-
-          for attempt in {1..30}; do
-            if crate_exists axtra_macros; then
-              break
-            fi
-            if [[ "$attempt" == 30 ]]; then
-              echo "axtra_macros did not become available on crates.io" >&2
-              exit 1
-            fi
-            sleep 10
-          done
-
-          if ! crate_exists axtra; then
+          if [[ "$AXTRA_PUBLISHED" != true ]]; then
             cargo publish --locked -p axtra
+          fi
+
+      - name: Create GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ needs.detect.outputs.release_sha }}
+          RELEASE_VERSION: ${{ needs.detect.outputs.version }}
+        run: |
+          tag="axtra-v${RELEASE_VERSION}"
+          if ! gh release view "$tag" > /dev/null 2>&1; then
+            gh release create "$tag" --target "$RELEASE_SHA" --title "$tag" --generate-notes
           fi
