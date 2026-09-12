@@ -6,7 +6,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::time::Duration;
-use tokio::sync::{Notify, Semaphore};
+use tokio::sync::{Notify, Semaphore, TryAcquireError};
 
 use super::{ErrorEvent, ErrorNotifier};
 
@@ -178,7 +178,13 @@ impl NotificationManager {
     /// This method sends the event to all providers concurrently and logs any failures.
     /// It does not fail if individual providers fail - errors are logged and execution continues.
     pub async fn notify(&self, event: &ErrorEvent) {
-        let Some((_permit, _guard)) = self.begin_notification() else {
+        if self.providers.is_empty() || self.shutting_down.load(Ordering::Acquire) {
+            return;
+        }
+        let Ok(permit) = Arc::clone(&self.notification_permits).acquire_owned().await else {
+            return;
+        };
+        let Some((_permit, _guard)) = self.activate_notification(permit) else {
             return;
         };
 
@@ -205,8 +211,9 @@ impl NotificationManager {
         futures::future::join_all(futures).await;
     }
 
-    fn begin_notification(
+    fn activate_notification(
         &self,
+        permit: tokio::sync::OwnedSemaphorePermit,
     ) -> Option<(
         tokio::sync::OwnedSemaphorePermit,
         ActiveNotificationGuard<'_>,
@@ -214,10 +221,6 @@ impl NotificationManager {
         if self.providers.is_empty() || self.shutting_down.load(Ordering::Acquire) {
             return None;
         }
-        let Ok(permit) = Arc::clone(&self.notification_permits).try_acquire_owned() else {
-            tracing::warn!("notification capacity exhausted; dropping error notification");
-            return None;
-        };
         self.active_notifications.fetch_add(1, Ordering::AcqRel);
         let guard = ActiveNotificationGuard(self);
         if self.shutting_down.load(Ordering::Acquire) {
@@ -230,7 +233,18 @@ impl NotificationManager {
     /// Dispatch a notification without blocking the response path while
     /// retaining it for an orderly shutdown.
     pub(crate) fn dispatch(&'static self, event: ErrorEvent) {
-        let Some((permit, guard)) = self.begin_notification() else {
+        if self.providers.is_empty() || self.shutting_down.load(Ordering::Acquire) {
+            return;
+        }
+        let permit = match Arc::clone(&self.notification_permits).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(TryAcquireError::NoPermits) => {
+                tracing::warn!("notification capacity exhausted; dropping error notification");
+                return;
+            }
+            Err(TryAcquireError::Closed) => return,
+        };
+        let Some((permit, guard)) = self.activate_notification(permit) else {
             return;
         };
         tokio::spawn(async move {
@@ -243,6 +257,7 @@ impl NotificationManager {
     /// Wait for dispatched notifications, then flush provider buffers.
     pub async fn shutdown(&self) {
         self.shutting_down.store(true, Ordering::Release);
+        self.notification_permits.close();
         let drain = async {
             loop {
                 let notified = self.idle.notified();
@@ -523,5 +538,39 @@ mod tests {
         manager.notify(&event()).await;
 
         assert_eq!(calls.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn public_notify_waits_for_capacity() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let manager = Arc::new(
+            NotificationManager::builder()
+                .with_provider(Arc::new(CountingProvider(Arc::clone(&calls))))
+                .build(),
+        );
+        let mut permits = Vec::new();
+        for _ in 0..MAX_IN_FLIGHT_NOTIFICATIONS {
+            permits.push(
+                Arc::clone(&manager.notification_permits)
+                    .acquire_owned()
+                    .await
+                    .unwrap(),
+            );
+        }
+        let notifying_manager = Arc::clone(&manager);
+        let task = tokio::spawn(async move {
+            notifying_manager.notify(&event()).await;
+        });
+        tokio::task::yield_now().await;
+
+        assert!(!task.is_finished());
+        assert_eq!(calls.load(Ordering::Acquire), 0);
+
+        permits.pop();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("public notify should resume when capacity is available")
+            .unwrap();
+        assert_eq!(calls.load(Ordering::Acquire), 1);
     }
 }
