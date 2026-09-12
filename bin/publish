@@ -1,37 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ "$(git branch --show-current)" != "main" ]; then
-  echo "Run this release command from main."
-  exit 1
-fi
-
-if ! git diff --quiet || ! git diff --cached --quiet; then
-  echo "Commit all changes before creating a release."
-  exit 1
-fi
-
-macro_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "axtra_macros") | .version')
-axtra_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "axtra") | .version')
-if [ "$macro_version" != "$axtra_version" ]; then
-  echo "axtra and axtra_macros versions differ."
-  exit 1
-fi
-tag="axtra-v${axtra_version}"
-
-echo "🔍 Running clippy..."
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-
-echo "✅ Running tests..."
-cargo test --workspace --all-features
-
-echo "🔧 Building crate..."
-cargo build --workspace --release
-
-read -r -p "🚀 Create GitHub release '$tag'? [y/N]: " confirm
-if [[ "$confirm" =~ ^[Yy]$ ]]; then
-  gh release create "$tag" --target main --title "$tag" --generate-notes
-  echo "✅ Release created; GitHub Actions will publish both crates."
-else
-  echo "🛑 Release canceled."
-fi
+gh workflow run publish.yml --repo cosmicglue-io/axtra --ref main
+echo "Release workflow started."
