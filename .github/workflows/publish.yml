@@ -1,9 +1,12 @@
 name: Publish crates
 
 on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/publish.yml
+      - axtra/Cargo.toml
+      - axtra_macros/Cargo.toml
   workflow_dispatch:
 
 permissions:
@@ -14,12 +17,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  verify:
+    uses: ./.github/workflows/ci.yml
+
   detect:
     if: >-
       (github.event_name == 'workflow_dispatch' &&
       github.ref == 'refs/heads/main') ||
-      (github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.head_branch == 'main')
+      github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
       axtra_published: ${{ steps.version.outputs.axtra_published }}
@@ -29,14 +34,12 @@ jobs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Detect unpublished version
         id: version
         shell: bash
         env:
-          RELEASE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          RELEASE_SHA: ${{ github.sha }}
         run: |
           macro_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "axtra_macros") | .version')
           axtra_version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "axtra") | .version')
@@ -71,7 +74,7 @@ jobs:
           fi
 
   publish:
-    needs: detect
+    needs: [detect, verify]
     if: needs.detect.outputs.needs_publish == 'true'
     runs-on: ubuntu-latest
     environment: release
@@ -113,10 +116,11 @@ jobs:
           fi
 
   release:
-    needs: [detect, publish]
+    needs: [detect, publish, verify]
     if: >-
       always() &&
       needs.detect.result == 'success' &&
+      needs.verify.result == 'success' &&
       (needs.publish.result == 'success' || needs.publish.result == 'skipped')
     runs-on: ubuntu-latest
     permissions:
