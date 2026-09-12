@@ -16,7 +16,8 @@ concurrency:
 jobs:
   detect:
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main') ||
       (github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
@@ -44,20 +45,26 @@ jobs:
             exit 1
           fi
 
-          crate_exists() {
-            cargo info --registry crates-io "$1@$axtra_version" > /dev/null 2>&1
+          crate_status() {
+            local output
+            if output=$(cargo info --registry crates-io "$1@$axtra_version" 2>&1); then
+              echo published
+            elif grep -Fq "could not find" <<< "$output" && grep -Fq "$1@$axtra_version" <<< "$output"; then
+              echo missing
+            else
+              echo "$output" >&2
+              return 1
+            fi
           }
 
-          macro_published=false
-          axtra_published=false
-          crate_exists axtra_macros && macro_published=true
-          crate_exists axtra && axtra_published=true
+          macro_published=$(crate_status axtra_macros)
+          axtra_published=$(crate_status axtra)
 
           echo "version=$axtra_version" >> "$GITHUB_OUTPUT"
           echo "release_sha=$RELEASE_SHA" >> "$GITHUB_OUTPUT"
           echo "macro_published=$macro_published" >> "$GITHUB_OUTPUT"
           echo "axtra_published=$axtra_published" >> "$GITHUB_OUTPUT"
-          if [[ "$macro_published" == true && "$axtra_published" == true ]]; then
+          if [[ "$macro_published" == published && "$axtra_published" == published ]]; then
             echo "needs_publish=false" >> "$GITHUB_OUTPUT"
           else
             echo "needs_publish=true" >> "$GITHUB_OUTPUT"
@@ -69,7 +76,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: release
     permissions:
-      contents: write
+      contents: read
       id-token: write
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -87,13 +94,34 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
           MACRO_PUBLISHED: ${{ needs.detect.outputs.macro_published }}
         run: |
-          if [[ "$MACRO_PUBLISHED" != true ]]; then
+          if [[ "$MACRO_PUBLISHED" != published ]]; then
             cargo publish --locked -p axtra_macros
+
+            for attempt in {1..12}; do
+              if cargo info --registry crates-io "axtra_macros@${{ needs.detect.outputs.version }}" > /dev/null 2>&1; then
+                break
+              fi
+              if [[ "$attempt" == 12 ]]; then
+                echo "axtra_macros did not become available on crates.io" >&2
+                exit 1
+              fi
+              sleep 5
+            done
           fi
-          if [[ "$AXTRA_PUBLISHED" != true ]]; then
+          if [[ "$AXTRA_PUBLISHED" != published ]]; then
             cargo publish --locked -p axtra
           fi
 
+  release:
+    needs: [detect, publish]
+    if: >-
+      always() &&
+      needs.detect.result == 'success' &&
+      (needs.publish.result == 'success' || needs.publish.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
       - name: Create GitHub release
         shell: bash
         env:

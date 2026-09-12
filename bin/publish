@@ -1,15 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ "$(git branch --show-current)" != "main" ]; then
-  echo "Run this release command from main."
-  exit 1
-fi
-
-if ! git diff --quiet || ! git diff --cached --quiet; then
-  echo "Commit all changes before creating a release."
-  exit 1
-fi
-
-gh workflow run publish.yml --ref main
+gh workflow run publish.yml --repo cosmicglue-io/axtra --ref main
 echo "Release workflow started."
