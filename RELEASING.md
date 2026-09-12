@@ -21,5 +21,5 @@ Configure the same trusted publisher for both `axtra_macros` and `axtra`:
    crates.io, publishes `axtra_macros` before `axtra`, then creates the matching
    `axtra-v<version>` GitHub Release.
 
-Run `bin/publish` from a clean `main` to retry a partial release. Reruns are
-safe because versions already present on crates.io are skipped.
+Run `bin/publish` to retry a partial release. Reruns are safe because versions
+already present on crates.io are skipped.
