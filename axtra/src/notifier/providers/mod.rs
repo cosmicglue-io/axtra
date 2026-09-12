@@ -18,7 +18,7 @@ mod ntfy;
 #[cfg(feature = "notify-error-ntfy")]
 pub use ntfy::{NtfyConfig, NtfyProvider};
 
-#[cfg(feature = "notify-error-cmdline")]
-mod cmdline;
-#[cfg(feature = "notify-error-cmdline")]
-pub use cmdline::{CmdlineConfig, CmdlineProvider};
+#[cfg(feature = "notify-error-posthog")]
+mod posthog;
+#[cfg(feature = "notify-error-posthog")]
+pub use posthog::{PosthogConfig, PosthogProvider};

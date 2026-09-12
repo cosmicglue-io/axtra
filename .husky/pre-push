@@ -15,7 +15,7 @@ fi
 
 # Cargo test
 echo "🧪 Running tests..."
-cargo test
+cargo test --workspace --all-features
 if [ $? -ne 0 ]; then
   echo "❌ Tests failed"
   exit 1

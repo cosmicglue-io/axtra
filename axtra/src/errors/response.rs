@@ -24,6 +24,23 @@ fn load_error_page(path: &str, cache: &'static OnceLock<Option<String>>) -> Opti
         .as_deref()
 }
 
+fn escape_html_text(input: &str) -> String {
+    input.chars().fold(
+        String::with_capacity(input.len()),
+        |mut output, character| {
+            match character {
+                '&' => output.push_str("&amp;"),
+                '<' => output.push_str("&lt;"),
+                '>' => output.push_str("&gt;"),
+                '"' => output.push_str("&quot;"),
+                '\'' => output.push_str("&#x27;"),
+                _ => output.push(character),
+            }
+            output
+        },
+    )
+}
+
 impl AppError {
     /// Generates a formatted error message for logging and notifications.
     pub fn formatted_message(&self) -> String {
@@ -120,10 +137,7 @@ impl AppError {
             event = event.with_source_error(source_error);
         }
 
-        // Spawn async task to send notifications
-        tokio::spawn(async move {
-            notification_manager().notify(&event).await;
-        });
+        notification_manager().dispatch(event);
     }
 
     /// Get the error source chain as a string for capture providers.
@@ -198,12 +212,35 @@ impl IntoResponse for AppError {
     <p>{}</p>
 </body>
 </html>"#,
-                        self.user_message()
+                        escape_html_text(self.user_message())
                     )
                 });
 
                 (status, Html(html_content)).into_response()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::to_bytes;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn fallback_html_escapes_user_message() {
+        let response = AppError::bad_request(
+            "<strong>invalid & unsafe</strong>",
+            None,
+            "test",
+            ErrorFormat::Html,
+        )
+        .into_response();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+
+        assert!(body.contains("&lt;strong&gt;invalid &amp; unsafe&lt;/strong&gt;"));
+        assert!(!body.contains("<strong>"));
     }
 }

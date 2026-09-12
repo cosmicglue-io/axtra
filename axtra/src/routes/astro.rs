@@ -6,6 +6,7 @@ use axum::{
     routing::get,
 };
 use http::{StatusCode, header};
+use std::path::Path;
 use tower::ServiceExt;
 use tower_http::{
     compression::CompressionLayer,
@@ -51,10 +52,17 @@ pub fn serve_static_files<S>() -> Router<S>
 where
     S: Clone + Send + Sync + 'static,
 {
-    let public_path = "./dist";
+    serve_static_files_from("./dist")
+}
+
+fn serve_static_files_from<S>(public_path: impl AsRef<Path>) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    let public_path = public_path.as_ref();
     let fallback_service = ServeDir::new(public_path)
         .append_index_html_on_directories(true)
-        .not_found_service(ServeFile::new(format!("{}/{}", public_path, "404.html")));
+        .not_found_service(ServeFile::new(public_path.join("404.html")));
     let compression_layer: CompressionLayer = CompressionLayer::new().gzip(true);
 
     // Base router
@@ -92,4 +100,59 @@ where
             }
         }))
         .layer(compression_layer)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, time::SystemTime};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn static_asset_families_receive_expected_cache_headers() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("axtra-static-{unique}"));
+        fs::create_dir_all(root.join("_static")).unwrap();
+        fs::create_dir_all(root.join("_astro")).unwrap();
+        fs::write(root.join("_static/app.js"), "static").unwrap();
+        fs::write(root.join("_astro/app.js"), "astro").unwrap();
+
+        let app: Router = serve_static_files_from(&root);
+        let static_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/_static/app.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let astro_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/_astro/app.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            static_response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .unwrap(),
+            "public, max-age=31536000"
+        );
+        assert_eq!(
+            astro_response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "public, max-age=2628000"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
 }

@@ -1,9 +1,10 @@
 [package]
 name = "axtra_macros"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
+rust-version = "1.88"
 description = "Derive macros for Axtra"
-repository = "https://github.com/imothee-io/axtra"
+repository = "https://github.com/cosmicglue-io/axtra"
 license = "MIT"
 keywords = ["axum", "astro", "web", "notifications", "errors"]
 

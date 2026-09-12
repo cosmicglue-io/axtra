@@ -24,7 +24,7 @@ pub struct ErrorEvent {
     /// Serialized error chain for capture providers (optional)
     pub source_error: Option<String>,
 
-    // Error tracking context (used by cmdline.dev and similar providers)
+    // Error tracking context for capture providers.
     /// Full stacktrace
     pub stacktrace: Option<String>,
     /// Request URL that triggered the error
@@ -98,11 +98,7 @@ impl ErrorEvent {
     }
 
     /// Add user context with email.
-    pub fn with_user_email(
-        mut self,
-        user_id: impl Into<String>,
-        email: impl Into<String>,
-    ) -> Self {
+    pub fn with_user_email(mut self, user_id: impl Into<String>, email: impl Into<String>) -> Self {
         self.user_id = Some(user_id.into());
         self.user_email = Some(email.into());
         self

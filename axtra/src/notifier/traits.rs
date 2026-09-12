@@ -54,7 +54,7 @@ pub type NotifyFuture<'a> = Pin<Box<dyn Future<Output = Result<(), NotifyError>>
 /// Implement this trait to create custom notification providers.
 /// Providers receive error events and decide how to handle them:
 /// - **Webhook providers** (Slack, Discord, ntfy): Format and send messages
-/// - **Capture providers** (Sentry, cmdline.io): Create incidents/issues
+/// - **Capture providers** (PostHog, Sentry): Create incidents/issues
 ///
 /// # Example
 ///
@@ -94,6 +94,13 @@ pub trait ErrorNotifier: Send + Sync {
     /// The `client` is a shared HTTP client for making requests.
     /// Returns `Ok(())` on success, or a `NotifyError` on failure.
     fn notify<'a>(&'a self, client: &'a Client, event: &'a ErrorEvent) -> NotifyFuture<'a>;
+
+    /// Flush buffered notifications and stop provider workers.
+    ///
+    /// Providers without buffering can use this default no-op.
+    fn shutdown(&self) -> NotifyFuture<'_> {
+        Box::pin(async { Ok(()) })
+    }
 
     /// Human-readable name for this provider (used in logs).
     fn name(&self) -> &'static str;

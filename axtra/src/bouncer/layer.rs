@@ -3,7 +3,10 @@ use std::{
     future::Future,
     net::{IpAddr, SocketAddr},
     pin::Pin,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -12,6 +15,8 @@ use dashmap::DashMap;
 use tower::{Layer, Service};
 
 pub type BanList = Arc<DashMap<IpAddr, Instant>>;
+
+const CLEANUP_INTERVAL_REQUESTS: usize = 1_024;
 
 #[derive(Debug, Clone)]
 pub struct BouncerConfig {
@@ -75,6 +80,7 @@ impl BouncerConfig {
 pub struct BouncerLayer {
     config: BouncerConfig,
     banlist: BanList,
+    cleanup_counter: Arc<AtomicUsize>,
 }
 
 impl BouncerLayer {
@@ -82,6 +88,7 @@ impl BouncerLayer {
         Self {
             config,
             banlist: Arc::new(DashMap::new()),
+            cleanup_counter: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -99,6 +106,7 @@ impl<S> Layer<S> for BouncerLayer {
             inner,
             config: self.config.clone(),
             banlist: self.banlist.clone(),
+            cleanup_counter: self.cleanup_counter.clone(),
         }
     }
 }
@@ -109,6 +117,7 @@ pub struct BouncerMiddleware<S> {
     inner: S,
     config: BouncerConfig,
     banlist: BanList,
+    cleanup_counter: Arc<AtomicUsize>,
 }
 
 impl<ReqBody, ResBody, S> Service<Request<ReqBody>> for BouncerMiddleware<S>
@@ -132,6 +141,7 @@ where
     fn call(&mut self, req: Request<ReqBody>) -> Self::Future {
         let config = self.config.clone();
         let banlist = self.banlist.clone();
+        let cleanup_counter = self.cleanup_counter.clone();
 
         let ip = extract_ip(&req, config.trust_proxy);
         let path = req.uri().path().to_owned();
@@ -140,9 +150,17 @@ where
         let mut inner = std::mem::replace(&mut self.inner, clone);
 
         Box::pin(async move {
+            let now = Instant::now();
+            if cleanup_counter
+                .fetch_add(1, Ordering::Relaxed)
+                .is_multiple_of(CLEANUP_INTERVAL_REQUESTS)
+            {
+                banlist.retain(|_, expiry| now < *expiry);
+            }
+
             if let Some(ip) = ip {
-                if let Some(&expiry) = banlist.get(&ip).as_deref() {
-                    if Instant::now() < expiry {
+                if let Some(expiry) = banlist.get(&ip).map(|entry| *entry) {
+                    if now < expiry {
                         log_event(
                             config.log_level,
                             &ip,
@@ -246,4 +264,80 @@ fn extract_ip<B>(req: &Request<B>, trust_proxy: bool) -> Option<IpAddr> {
     req.extensions()
         .get::<axum::extract::ConnectInfo<SocketAddr>>()
         .map(|info| info.0.ip())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{convert::Infallible, net::Ipv4Addr};
+
+    use axum::extract::ConnectInfo;
+    use tower::service_fn;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn expired_ban_is_removed_without_blocking() {
+        let layer = BouncerLayer::new(BouncerConfig::from_custom_rules(&[]));
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        layer
+            .banlist
+            .insert(ip, Instant::now() - Duration::from_secs(1));
+        let mut service = layer.layer(service_fn(|_| async {
+            Ok::<_, Infallible>(Response::<()>::default())
+        }));
+        let mut request = Request::new(());
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::new(ip, 8_080)));
+
+        tokio::time::timeout(Duration::from_secs(1), service.call(request))
+            .await
+            .expect("expired ban lookup should not block")
+            .unwrap();
+
+        assert!(!layer.banlist.contains_key(&ip));
+    }
+
+    #[tokio::test]
+    async fn periodic_cleanup_removes_expired_bans() {
+        let layer = BouncerLayer::new(BouncerConfig::from_custom_rules(&[]));
+        let expired_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        layer
+            .banlist
+            .insert(expired_ip, Instant::now() - Duration::from_secs(1));
+        let mut service = layer.layer(service_fn(|_| async {
+            Ok::<_, Infallible>(Response::<()>::default())
+        }));
+
+        service.call(Request::new(())).await.unwrap();
+
+        assert!(!layer.banlist.contains_key(&expired_ip));
+    }
+
+    #[tokio::test]
+    async fn proxy_headers_are_used_only_when_trusted() {
+        let direct_ip = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+        let proxy_ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20));
+
+        for (trust_proxy, expected_ip) in [(false, direct_ip), (true, proxy_ip)] {
+            let layer = BouncerLayer::new(
+                BouncerConfig::from_custom_rules(&["/blocked"]).trust_proxy(trust_proxy),
+            );
+            let mut service = layer.layer(service_fn(|_| async {
+                Ok::<_, Infallible>(Response::<()>::default())
+            }));
+            let mut request = Request::builder()
+                .uri("/blocked")
+                .header("cf-connecting-ip", proxy_ip.to_string())
+                .body(())
+                .unwrap();
+            request
+                .extensions_mut()
+                .insert(ConnectInfo(SocketAddr::new(direct_ip, 8_080)));
+
+            service.call(request).await.unwrap();
+
+            assert!(layer.banlist.contains_key(&expected_ip));
+        }
+    }
 }
