@@ -10,7 +10,10 @@ use tokio::sync::{Notify, Semaphore};
 
 use super::{ErrorEvent, ErrorNotifier};
 
+#[cfg(not(test))]
 const NOTIFICATION_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(test)]
+const NOTIFICATION_DRAIN_TIMEOUT: Duration = Duration::from_millis(50);
 #[cfg(not(test))]
 const PROVIDER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(test)]
@@ -55,9 +58,9 @@ pub struct NotificationManager {
     shutting_down: AtomicBool,
 }
 
-struct ActiveNotificationGuard(&'static NotificationManager);
+struct ActiveNotificationGuard<'a>(&'a NotificationManager);
 
-impl Drop for ActiveNotificationGuard {
+impl Drop for ActiveNotificationGuard<'_> {
     fn drop(&mut self) {
         if self.0.active_notifications.fetch_sub(1, Ordering::AcqRel) == 1 {
             self.0.idle.notify_waiters();
@@ -169,15 +172,20 @@ impl NotificationManager {
         self.providers.len()
     }
 
-    /// Send a notification to all configured providers.
+    /// Send a notification to all configured providers within the manager's
+    /// concurrency and lifecycle bounds.
     ///
     /// This method sends the event to all providers concurrently and logs any failures.
     /// It does not fail if individual providers fail - errors are logged and execution continues.
     pub async fn notify(&self, event: &ErrorEvent) {
-        if self.providers.is_empty() {
+        let Some((_permit, _guard)) = self.begin_notification() else {
             return;
-        }
+        };
 
+        self.notify_providers(event).await;
+    }
+
+    async fn notify_providers(&self, event: &ErrorEvent) {
         let futures: Vec<_> = self
             .providers
             .iter()
@@ -197,26 +205,38 @@ impl NotificationManager {
         futures::future::join_all(futures).await;
     }
 
-    /// Dispatch a notification without blocking the response path while
-    /// retaining it for an orderly shutdown.
-    pub(crate) fn dispatch(&'static self, event: ErrorEvent) {
+    fn begin_notification(
+        &self,
+    ) -> Option<(
+        tokio::sync::OwnedSemaphorePermit,
+        ActiveNotificationGuard<'_>,
+    )> {
         if self.providers.is_empty() || self.shutting_down.load(Ordering::Acquire) {
-            return;
+            return None;
         }
         let Ok(permit) = Arc::clone(&self.notification_permits).try_acquire_owned() else {
             tracing::warn!("notification capacity exhausted; dropping error notification");
-            return;
+            return None;
         };
         self.active_notifications.fetch_add(1, Ordering::AcqRel);
         let guard = ActiveNotificationGuard(self);
         if self.shutting_down.load(Ordering::Acquire) {
-            drop(guard);
-            return;
+            return None;
         }
+
+        Some((permit, guard))
+    }
+
+    /// Dispatch a notification without blocking the response path while
+    /// retaining it for an orderly shutdown.
+    pub(crate) fn dispatch(&'static self, event: ErrorEvent) {
+        let Some((permit, guard)) = self.begin_notification() else {
+            return;
+        };
         tokio::spawn(async move {
             let _guard = guard;
             let _permit = permit;
-            self.notify(&event).await;
+            self.notify_providers(&event).await;
         });
     }
 
@@ -238,6 +258,7 @@ impl NotificationManager {
             .is_err()
         {
             tracing::warn!("timed out waiting for error notifications to drain");
+            return;
         }
 
         futures::future::join_all(self.providers.iter().map(|provider| async move {
@@ -335,6 +356,8 @@ impl Default for NotificationManagerBuilder {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicUsize;
+
     use super::*;
     use crate::errors::ErrorCode;
     use crate::notifier::NotifyFuture;
@@ -379,6 +402,42 @@ mod tests {
 
         fn name(&self) -> &'static str {
             "hanging-shutdown"
+        }
+    }
+
+    struct HangingNotifyProvider {
+        shutdowns: Arc<AtomicUsize>,
+    }
+
+    struct CountingProvider(Arc<AtomicUsize>);
+
+    impl ErrorNotifier for CountingProvider {
+        fn notify<'a>(&'a self, _: &'a Client, _: &'a ErrorEvent) -> NotifyFuture<'a> {
+            Box::pin(async move {
+                self.0.fetch_add(1, Ordering::AcqRel);
+                Ok(())
+            })
+        }
+
+        fn name(&self) -> &'static str {
+            "counting"
+        }
+    }
+
+    impl ErrorNotifier for HangingNotifyProvider {
+        fn notify<'a>(&'a self, _: &'a Client, _: &'a ErrorEvent) -> NotifyFuture<'a> {
+            Box::pin(std::future::pending())
+        }
+
+        fn shutdown(&self) -> NotifyFuture<'_> {
+            Box::pin(async move {
+                self.shutdowns.fetch_add(1, Ordering::AcqRel);
+                Ok(())
+            })
+        }
+
+        fn name(&self) -> &'static str {
+            "hanging-notify"
         }
     }
 
@@ -433,5 +492,36 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), manager.shutdown())
             .await
             .expect("provider shutdown should have a deadline");
+    }
+
+    #[tokio::test]
+    async fn drain_timeout_does_not_overlap_provider_shutdown() {
+        let shutdowns = Arc::new(AtomicUsize::new(0));
+        let manager = Box::leak(Box::new(
+            NotificationManager::builder()
+                .with_provider(Arc::new(HangingNotifyProvider {
+                    shutdowns: Arc::clone(&shutdowns),
+                }))
+                .build(),
+        ));
+
+        manager.dispatch(event());
+        tokio::task::yield_now().await;
+        manager.shutdown().await;
+
+        assert_eq!(shutdowns.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn public_notify_is_ignored_after_shutdown_starts() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let manager = NotificationManager::builder()
+            .with_provider(Arc::new(CountingProvider(Arc::clone(&calls))))
+            .build();
+
+        manager.shutdown().await;
+        manager.notify(&event()).await;
+
+        assert_eq!(calls.load(Ordering::Acquire), 0);
     }
 }
