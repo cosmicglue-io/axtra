@@ -10,7 +10,7 @@
 //! - `notify-error-slack` - Slack webhook notifications
 //! - `notify-error-discord` - Discord webhook notifications
 //! - `notify-error-ntfy` - ntfy push notifications
-//! - `notify-error-cmdline` - cmdline.io error tracking
+//! - `notify-error-posthog` - PostHog error tracking
 //!
 //! ## Architecture
 //!
@@ -30,23 +30,25 @@
 //! // - SLACK_ERROR_WEBHOOK_URL (+ optional SLACK_ERROR_MENTION)
 //! // - DISCORD_ERROR_WEBHOOK_URL (+ optional DISCORD_ERROR_MENTION)
 //! // - NTFY_TOPIC (+ optional NTFY_SERVER_URL, NTFY_ACCESS_TOKEN)
-//! // - CMDLINE_API_KEY (+ optional ENVIRONMENT/ENV, SERVICE/APP_NAME, RELEASE/VERSION)
+//! // - POSTHOG_PROJECT_TOKEN (+ optional POSTHOG_HOST, ENVIRONMENT/ENV,
+//! //   SERVICE/APP_NAME, RELEASE/VERSION)
 //! init_notification_manager(NotificationManager::from_env());
 //! ```
 //!
 //! ### Builder pattern (recommended)
 //!
 //! ```rust,ignore
-//! use axtra::notifier::{NotificationManager, SlackConfig, NtfyConfig, CmdlineConfig};
+//! use axtra::notifier::{NotificationManager, SlackConfig, NtfyConfig, PosthogConfig};
 //! use axtra::errors::notifiers::init_notification_manager;
 //!
 //! let manager = NotificationManager::builder()
 //!     .with_slack(SlackConfig::new("https://hooks.slack.com/services/...")
 //!         .with_mention("@oncall"))
 //!     .with_ntfy(NtfyConfig::new("my-app-errors"))
-//!     .with_cmdline(CmdlineConfig::new(std::env::var("CMDLINE_API_KEY").unwrap())
+//!     .with_posthog(PosthogConfig::new(std::env::var("POSTHOG_PROJECT_TOKEN").unwrap())
 //!         .with_environment("production")
 //!         .with_service("my-app"))
+//!     .unwrap()
 //!     .build();
 //!
 //! init_notification_manager(manager);
@@ -82,31 +84,31 @@
 //! ```
 //!
 //! ## See Also
-//! - [README](https://github.com/imothee-io/axtra)
+//! - [README](https://github.com/cosmicglue-io/axtra)
 //! - [docs.rs/axtra](https://docs.rs/axtra)
 
 #[cfg(feature = "notifier")]
 mod event;
 #[cfg(feature = "notifier")]
-mod traits;
-#[cfg(feature = "notifier")]
 mod manager;
 #[cfg(feature = "notifier")]
 pub mod providers;
+#[cfg(feature = "notifier")]
+mod traits;
 
 #[cfg(feature = "notifier")]
 pub use event::ErrorEvent;
 #[cfg(feature = "notifier")]
-pub use traits::{ErrorNotifier, NotifyError, NotifyFuture};
-#[cfg(feature = "notifier")]
 pub use manager::{NotificationManager, NotificationManagerBuilder};
+#[cfg(feature = "notifier")]
+pub use traits::{ErrorNotifier, NotifyError, NotifyFuture};
 
 // Re-export provider configs at top level for convenience
-#[cfg(feature = "notify-error-ntfy")]
-pub use providers::{NtfyConfig, NtfyProvider};
-#[cfg(feature = "notify-error-cmdline")]
-pub use providers::{CmdlineConfig, CmdlineProvider};
-#[cfg(feature = "notify-error-slack")]
-pub use providers::{SlackConfig, SlackProvider};
 #[cfg(feature = "notify-error-discord")]
 pub use providers::{DiscordConfig, DiscordProvider};
+#[cfg(feature = "notify-error-ntfy")]
+pub use providers::{NtfyConfig, NtfyProvider};
+#[cfg(feature = "notify-error-posthog")]
+pub use providers::{PosthogConfig, PosthogProvider};
+#[cfg(feature = "notify-error-slack")]
+pub use providers::{SlackConfig, SlackProvider};

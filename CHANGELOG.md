@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.4.0
+
+### Breaking Changes
+
+- Replaced the Cmdline notifier and `notify-error-cmdline` feature with the
+  PostHog notifier and `notify-error-posthog`.
+- Aligned `axtra` and `axtra_macros` package versions.
+
+### New Features
+
+- Added PostHog `$exception` capture through the official Rust SDK.
+- Added notifier shutdown draining so buffered capture providers can flush.
+- PostHog exceptions include app, environment, release, severity, stable
+  fingerprint, and source location without request URLs or user emails.
+- Error fallback pages now encode dynamic text, and expired bouncer entries are
+  removed without blocking requests.
+- Nested validation paths and generic `ResponseKey` derives are preserved.
+- Notification concurrency, request latency, and shutdown latency are bounded.
+- CI now verifies formatting, strict Clippy, all features, isolated features,
+  package contents, and the Rust 1.88 minimum supported version.
+- GitHub Releases now publish both crates with short-lived crates.io Trusted
+  Publishing credentials.
+
 ## 0.3.0
 
 ### Breaking Changes

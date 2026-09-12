@@ -10,9 +10,9 @@ Opinionated helpers for Axum + Astro projects.
 > **Warning:** This library is experimental, opinionated, and subject to breaking changes.
 > 🐉 Here be dragons 🐉
 
-**Sponsored by [cmdline.io](https://cmdline.io)** - Error tracking and incident management for Rust applications.
-
----
+Axtra 0.4 requires Rust 1.88 or newer. Postgres support through `sqlx` is part
+of the core crate because database errors and the health endpoint share that
+contract; notification and bouncer integrations remain opt-in features.
 
 ## Features
 
@@ -34,7 +34,7 @@ Opinionated helpers for Axum + Astro projects.
 
 - **Error Notifications**
   - Pluggable notification system with trait-based architecture
-  - Built-in providers: Slack, Discord, ntfy, cmdline.io
+  - Built-in providers: Slack, Discord, ntfy, PostHog
   - Create custom providers by implementing `ErrorNotifier` trait
   - Configure via builder pattern or environment variables
   
@@ -62,7 +62,7 @@ Opinionated helpers for Axum + Astro projects.
 ### Notifications
 - **Pluggable Notification System**
   - Trait-based architecture for custom providers
-  - Built-in: Slack, Discord, ntfy, cmdline.io
+  - Built-in: Slack, Discord, ntfy, PostHog
   - Easy to add Sentry, PagerDuty, or any custom provider
 
 ---
@@ -87,7 +87,7 @@ AppErrors will be logged automatically with the following severity
 
 - **INFO**: Expected authentication/authorization failures.
 - **WARN**: Client errors, invalid input, not found, validation issues.
-- **ERROR**: Server-side failures, database errors, exceptions, and triggers notifications (Slack/Discord/Sentry if enabled).
+- **ERROR**: Server-side failures, database errors, and exceptions; configured providers are notified.
 
 ### WithRejection
 
@@ -242,7 +242,7 @@ export type ValidationFieldError = { field: string, code: string, message: strin
 ### Error Notification System
 
 Axtra uses a pluggable, trait-based notification system for sending critical errors to external services.
-This design keeps axtra lean and unopinionated—you choose which providers to use and at what versions.
+Providers are opt-in, so applications include only the notification integrations they select.
 
 #### Quick Start
 
@@ -257,20 +257,24 @@ init_notification_manager(NotificationManager::from_env());
 #### Builder Pattern (Recommended)
 
 ```rust
-use axtra::notifier::{NotificationManager, SlackConfig, DiscordConfig, NtfyConfig, CmdlineConfig};
-use axtra::errors::notifiers::init_notification_manager;
+use axtra::notifier::{NotificationManager, SlackConfig, DiscordConfig, NtfyConfig, PosthogConfig};
+use axtra::errors::notifiers::{init_notification_manager, shutdown_notification_manager};
 
 let manager = NotificationManager::builder()
     .with_slack(SlackConfig::new("https://hooks.slack.com/services/...")
         .with_mention("@oncall"))
     .with_discord(DiscordConfig::new("https://discord.com/api/webhooks/..."))
     .with_ntfy(NtfyConfig::new("my-app-errors"))
-    .with_cmdline(CmdlineConfig::new(std::env::var("CMDLINE_API_KEY").unwrap())
+    .with_posthog(PosthogConfig::new(std::env::var("POSTHOG_PROJECT_TOKEN").unwrap())
         .with_environment("production")
         .with_service("my-app"))
+    .unwrap()
     .build();
 
 init_notification_manager(manager);
+
+// After the server future resolves:
+shutdown_notification_manager().await;
 ```
 
 #### Feature Flags
@@ -279,7 +283,7 @@ Enable the providers you need in `Cargo.toml`:
 
 ```toml
 [dependencies]
-axtra = { version = "0.3", features = ["notify-error-slack", "notify-error-ntfy"] }
+axtra = { version = "0.4", features = ["notify-error-slack", "notify-error-posthog"] }
 ```
 
 | Feature | Provider | Environment Variables |
@@ -287,11 +291,11 @@ axtra = { version = "0.3", features = ["notify-error-slack", "notify-error-ntfy"
 | `notify-error-slack` | Slack webhook | `SLACK_ERROR_WEBHOOK_URL`, `SLACK_ERROR_MENTION` (optional) |
 | `notify-error-discord` | Discord webhook | `DISCORD_ERROR_WEBHOOK_URL`, `DISCORD_ERROR_MENTION` (optional) |
 | `notify-error-ntfy` | [ntfy](https://ntfy.sh) push notifications | `NTFY_TOPIC`, `NTFY_SERVER_URL` (optional), `NTFY_ACCESS_TOKEN` (optional) |
-| `notify-error-cmdline` | [cmdline.io](https://cmdline.io) error tracking | `CMDLINE_API_KEY`, `ENVIRONMENT` or `ENV`, `SERVICE` or `APP_NAME`, `RELEASE` or `VERSION` |
+| `notify-error-posthog` | [PostHog](https://posthog.com) error tracking | `POSTHOG_PROJECT_TOKEN`, `POSTHOG_HOST` (optional), `ENVIRONMENT`, `APP_ENV`, or `ENV`, `SERVICE` or `APP_NAME`, `RELEASE` or `VERSION` |
 
 #### Custom Providers
 
-Implement the `ErrorNotifier` trait to add any provider. This keeps axtra free of version lock-in—you control your dependencies.
+Implement the `ErrorNotifier` trait to add a provider without changing Axtra.
 
 ##### Sentry Example
 
@@ -339,52 +343,6 @@ let manager = NotificationManager::builder()
     .build();
 ```
 
-##### cmdline.io Example
-
-The built-in `CmdlineProvider` handles error tracking automatically, but here's how you could customize it:
-
-```rust
-use axtra::notifier::{ErrorNotifier, ErrorEvent, NotifyError, NotifyFuture};
-use reqwest::Client;
-
-struct MyCmdlineProvider {
-    api_key: String,
-    environment: Option<String>,
-    service: Option<String>,
-}
-
-impl ErrorNotifier for MyCmdlineProvider {
-    fn notify<'a>(&'a self, client: &'a Client, event: &'a ErrorEvent) -> NotifyFuture<'a> {
-        Box::pin(async move {
-            client.post("https://cmdline.io/api/ingest/errors")
-                .header("Authorization", format!("Bearer {}", self.api_key))
-                .json(&serde_json::json!({
-                    "title": format!("{:?}: {}", event.error_code, event.message),
-                    "severity": event.severity(),
-                    "error_type": "exception",
-                    "environment": self.environment,
-                    "service": self.service.as_deref().unwrap_or(&event.app_name),
-                    "message": event.source_error,
-                    "extra": {
-                        "location": event.location,
-                    },
-                }))
-                .send()
-                .await
-                .map_err(NotifyError::transient)?
-                .error_for_status()
-                .map_err(NotifyError::permanent)?;
-
-            Ok(())
-        })
-    }
-
-    fn name(&self) -> &'static str {
-        "cmdline"
-    }
-}
-```
-
 ##### PagerDuty Example
 
 ```rust
@@ -427,7 +385,7 @@ impl ErrorNotifier for PagerDutyProvider {
 ---
 
 **Note:**
-All notification features are opt-in and only trigger for server-side errors (`Database`, `Exception`, or `throw`).
+All notification features are opt-in and only trigger automatically for server-side errors (`Database` and `Exception`).
 Notifications are sent concurrently to all configured providers.
 
 ---
@@ -441,7 +399,7 @@ Axtra provides a convenient way to wrap API responses with a predictable key, us
 #### Usage
 
 ```rust
-use axtra::response::{WrappedJson, ResponseKey};
+use axtra::{ResponseKey, response::WrappedJson};
 use serde::Serialize;
 
 #[derive(Serialize, ResponseKey)]

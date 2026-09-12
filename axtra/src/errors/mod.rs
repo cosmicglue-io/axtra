@@ -4,7 +4,7 @@
 //! - The [`AppError`] enum for unified error handling
 //! - Error construction macros ([`app_error!`])
 //! - TypeScript type generation for error codes
-//! - Notification integration (Slack, Discord, ntfy, cmdline.io, custom)
+//! - Notification integration (Slack, Discord, ntfy, PostHog, custom)
 //! - Automatic error location tracking
 //!
 //! See crate-level docs for usage examples.

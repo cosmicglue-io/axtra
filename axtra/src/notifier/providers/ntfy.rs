@@ -83,7 +83,10 @@ impl ErrorNotifier for NtfyProvider {
                 event.severity().to_uppercase(),
                 event.app_name
             );
-            let body = format!("[{}][{:?}] {}", event.location, event.error_code, event.message);
+            let body = format!(
+                "[{}][{:?}] {}",
+                event.location, event.error_code, event.message
+            );
 
             // Map severity to ntfy priority (1-5, with 5 being max)
             let priority = match event.severity() {

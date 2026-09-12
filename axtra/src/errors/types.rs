@@ -7,7 +7,7 @@ use http::StatusCode;
 use serde::Serialize;
 use thiserror::Error;
 use ts_rs::TS;
-use validator::ValidationErrors;
+use validator::{ValidationError, ValidationErrors, ValidationErrorsKind};
 
 use crate::error_location;
 
@@ -58,28 +58,64 @@ pub struct SerializableValidationErrors {
 impl From<ValidationErrors> for SerializableValidationErrors {
     fn from(errors: ValidationErrors) -> Self {
         let mut field_errors = Vec::new();
-        for (field, error_map) in errors.field_errors() {
-            for error in error_map {
-                let params = error
-                    .params
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect();
-                field_errors.push(ValidationFieldError {
-                    field: field.to_string(),
-                    code: error.code.to_string(),
-                    message: error
-                        .message
-                        .as_ref()
-                        .map(|cow| cow.to_string())
-                        .unwrap_or_else(|| format!("Validation failed for {field}")),
-                    params,
-                });
-            }
-        }
+        collect_validation_errors(&errors, "", &mut field_errors);
+        field_errors.sort_by(|left, right| {
+            left.field
+                .cmp(&right.field)
+                .then_with(|| left.code.cmp(&right.code))
+        });
         SerializableValidationErrors {
             errors: field_errors,
         }
+    }
+}
+
+fn collect_validation_errors(
+    errors: &ValidationErrors,
+    prefix: &str,
+    output: &mut Vec<ValidationFieldError>,
+) {
+    for (field, kind) in errors.errors() {
+        let path = if prefix.is_empty() {
+            field.to_string()
+        } else {
+            format!("{prefix}.{field}")
+        };
+
+        match kind {
+            ValidationErrorsKind::Field(field_errors) => {
+                output.extend(
+                    field_errors
+                        .iter()
+                        .map(|error| serialize_validation_error(&path, error)),
+                );
+            }
+            ValidationErrorsKind::Struct(nested) => {
+                collect_validation_errors(nested, &path, output);
+            }
+            ValidationErrorsKind::List(items) => {
+                for (index, nested) in items {
+                    collect_validation_errors(nested, &format!("{path}[{index}]"), output);
+                }
+            }
+        }
+    }
+}
+
+fn serialize_validation_error(field: &str, error: &ValidationError) -> ValidationFieldError {
+    ValidationFieldError {
+        field: field.to_string(),
+        code: error.code.to_string(),
+        message: error
+            .message
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| format!("Validation failed for {field}")),
+        params: error
+            .params
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect(),
     }
 }
 
@@ -234,6 +270,44 @@ impl AppError {
             location: location.as_ref().to_string(),
             format,
         }
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use std::{borrow::Cow, collections::BTreeMap};
+
+    use super::*;
+
+    fn error(code: &'static str) -> ValidationError {
+        ValidationError::new(code)
+    }
+
+    #[test]
+    fn serializes_nested_struct_and_list_errors() {
+        let mut address = ValidationErrors::new();
+        address.add("city", error("required"));
+
+        let mut first_item = ValidationErrors::new();
+        first_item.add("sku", error("invalid"));
+        let items = BTreeMap::from([(0, Box::new(first_item))]);
+
+        let errors = ValidationErrors(std::collections::HashMap::from([
+            (
+                Cow::Borrowed("address"),
+                ValidationErrorsKind::Struct(Box::new(address)),
+            ),
+            (Cow::Borrowed("items"), ValidationErrorsKind::List(items)),
+        ]));
+
+        let serialized = SerializableValidationErrors::from(errors);
+        let fields: Vec<_> = serialized
+            .errors
+            .iter()
+            .map(|error| error.field.as_str())
+            .collect();
+
+        assert_eq!(fields, ["address.city", "items[0].sku"]);
     }
 }
 

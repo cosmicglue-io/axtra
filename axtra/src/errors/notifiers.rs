@@ -6,7 +6,7 @@
 //! ## Usage
 //!
 //! ```rust,ignore
-//! use axtra::notifier::NotificationManager;
+//! use axtra::notifier::{NotificationManager, SlackConfig};
 //! use axtra::errors::notifiers::init_notification_manager;
 //!
 //! // Option 1: Auto-configure from environment variables
@@ -14,7 +14,7 @@
 //!
 //! // Option 2: Manual configuration
 //! let manager = NotificationManager::builder()
-//!     .with_slack("https://hooks.slack.com/services/...")
+//!     .with_slack(SlackConfig::new("https://hooks.slack.com/services/..."))
 //!     .build();
 //! init_notification_manager(manager);
 //! ```
@@ -54,4 +54,10 @@ pub fn init_notification_manager(manager: NotificationManager) {
 #[cfg(feature = "notifier")]
 pub fn notification_manager() -> &'static NotificationManager {
     NOTIFICATION_MANAGER.get_or_init(NotificationManager::from_env)
+}
+
+/// Drain in-flight notifications and flush provider buffers.
+#[cfg(feature = "notifier")]
+pub async fn shutdown_notification_manager() {
+    notification_manager().shutdown().await;
 }
