@@ -17,6 +17,9 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  verify:
+    uses: ./.github/workflows/ci.yml
+
   detect:
     if: >-
       (github.event_name == 'workflow_dispatch' &&
@@ -71,7 +74,7 @@ jobs:
           fi
 
   publish:
-    needs: detect
+    needs: [detect, verify]
     if: needs.detect.outputs.needs_publish == 'true'
     runs-on: ubuntu-latest
     environment: release
@@ -113,10 +116,11 @@ jobs:
           fi
 
   release:
-    needs: [detect, publish]
+    needs: [detect, publish, verify]
     if: >-
       always() &&
       needs.detect.result == 'success' &&
+      needs.verify.result == 'success' &&
       (needs.publish.result == 'success' || needs.publish.result == 'skipped')
     runs-on: ubuntu-latest
     permissions:
